@@ -3,6 +3,7 @@
 #include<bits/stdc++.h> 
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
+#include <opencv2/imgproc.hpp>
 
 extern "C" {
     #include <libavcodec/avcodec.h>
@@ -27,6 +28,33 @@ int             dst_bufsize;
 SwsContext *img_convert_ctx;
 int dst_linesize[4];
 
+
+void motionToColor(const cv::Mat &dx, const cv::Mat &dy) {
+
+    //calculate angle and magnitude
+    cv::Mat magnitude, angle;
+    cv::cartToPolar(dx, dy, magnitude, angle, true);
+
+    //translate magnitude to range [0;1]
+    double mag_max;
+    cv::minMaxLoc(magnitude, 0, &mag_max);
+    magnitude.convertTo(magnitude, -1, 1.0 / mag_max);
+
+    //build hsv image
+    cv::Mat _hsv[3], hsv;
+    _hsv[0] = angle;
+    _hsv[1] = cv::Mat::ones(angle.size(), CV_32F);
+    _hsv[2] = magnitude;
+    cv::merge(_hsv, 3, hsv);
+
+    //convert to BGR and show
+    cv::Mat bgr;//CV_32FC3 matrix
+    cv::cvtColor(hsv, bgr, cv::COLOR_HSV2BGR);
+    cv::resize(bgr, bgr, cv::Size(video_dec_ctx->width, video_dec_ctx->height));
+    cv::imshow("optical flow", bgr);
+
+    cv::waitKey(150);
+}
 
 void avframeToMat(const AVFrame * frame, cv::Mat& image)
 {
@@ -77,6 +105,36 @@ void ppm_save(AVFrame* incframe,
     fclose(f);
 }
 
+std::pair<cv::Mat, cv::Mat> MVtoMat(const AVMotionVector *mvs, int size, bool reset) {
+    static cv::Mat motionMatDx, motionMatDy;
+    const AVMotionVector *mv = &mvs[0];
+    int motionMatCols = static_cast<int>(video_dec_ctx->width / mv->w);
+    int motionMatRows = static_cast<int>(video_dec_ctx->height / mv->h);
+    if (motionMatDx.rows != motionMatRows || motionMatDx.cols != motionMatCols) {
+        motionMatDx = cv::Mat::zeros(motionMatRows, motionMatCols, CV_32FC1);
+        motionMatDy = cv::Mat::zeros(motionMatRows, motionMatCols, CV_32FC1);
+    }
+    if(reset){
+        motionMatDx.setTo(cv::Scalar::all(0));
+        motionMatDy.setTo(cv::Scalar::all(0));
+    }
+
+    for (int i = 0; i < size / sizeof(*mvs); i++) {
+        const AVMotionVector *mv = &mvs[i];
+        int x = static_cast<int>(mv->dst_x / mv->w);
+        int y = static_cast<int>(mv->dst_y / mv->h);
+        if (x < 0 || x >= motionMatCols || y < 0 || y >= motionMatRows) {
+            continue;
+        }
+        float val_x = mv->dst_x - mv->src_x;
+        float val_y = mv->dst_y - mv->src_y;
+
+        motionMatDx.at<float>(y,x) += val_x;
+        motionMatDy.at<float>(y,x) += val_y;
+    }
+    return std::pair<cv::Mat,cv::Mat>(motionMatDx, motionMatDy);
+}
+
 int decode_packet(const AVPacket *pkt)
 {
     static cv::Mat image;
@@ -87,6 +145,7 @@ int decode_packet(const AVPacket *pkt)
         return ret;
     }
 
+    bool reset = false;
     while (ret >= 0)  {
         ret = avcodec_receive_frame(video_dec_ctx, frame);
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
@@ -104,20 +163,26 @@ int decode_packet(const AVPacket *pkt)
             sd = av_frame_get_side_data(frame, AV_FRAME_DATA_MOTION_VECTORS);
             if (sd) {
                 const AVMotionVector *mvs = (const AVMotionVector *)sd->data;
-                for (i = 0; i < sd->size / sizeof(*mvs); i++) {
-                    const AVMotionVector *mv = &mvs[i];
-                    printf("%d,%2d,%2d,%2d,%4d,%4d,%4d,%4d,0x%"PRIx64"\n",
-                        video_frame_count, mv->source,
-                        mv->w, mv->h, mv->src_x, mv->src_y,
-                        mv->dst_x, mv->dst_y, mv->flags);
-                }
+                // for (i = 0; i < sd->size / sizeof(*mvs); i++) {
+                //     const AVMotionVector *mv = &mvs[i];
+                //     printf("%d,%2d,%2d,%2d,%4d,%4d,%4d,%4d,0x%"PRIx64"\n",
+                //         video_frame_count, mv->source,
+                //         mv->w, mv->h, mv->src_x, mv->src_y,
+                //         mv->dst_x, mv->dst_y, mv->flags);
+                // }
+                auto dxdy = MVtoMat(mvs, sd->size, reset);
+                reset = false;
+                motionToColor(dxdy.first, dxdy.second);
             } else {
+                reset = true;
+            }
+                std::cout << video_dec_ctx->frame_number << std::endl;
                 snprintf(buf, sizeof(buf), "%s-%d.ppm", "images", video_dec_ctx->frame_number);
                 // ppm_save(frame, buf);
                 avframeToMat(frame, image);
                 cv::imshow("image", image);
                 cv::waitKey(30);
-            }
+            // }
             av_frame_unref(frame);
         }
     }
