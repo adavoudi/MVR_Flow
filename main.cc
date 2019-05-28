@@ -1,5 +1,3 @@
-// Program to calculate factorial and
-// multiplication of two numbers.
 #include <bits/stdc++.h>
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
@@ -29,7 +27,7 @@ int dst_bufsize;
 SwsContext *img_convert_ctx;
 int dst_linesize[4];
 
-void motionToColor(const cv::Mat &flow)
+cv::Mat motionToColor(const cv::Mat &flow)
 {
 
     cv::Mat dxdy[2]; //X,Y
@@ -54,9 +52,8 @@ void motionToColor(const cv::Mat &flow)
     cv::Mat bgr; //CV_32FC3 matrix
     cv::cvtColor(hsv, bgr, cv::COLOR_HSV2BGR);
     cv::resize(bgr, bgr, cv::Size(video_dec_ctx->width, video_dec_ctx->height));
-    cv::imshow("optical flow", bgr);
-
-    cv::waitKey(150);
+    // cv::imshow("optical flow", bgr);
+    return bgr;
 }
 
 void avframeToMat(const AVFrame *frame, cv::Mat &image)
@@ -77,45 +74,13 @@ void avframeToMat(const AVFrame *frame, cv::Mat &image)
     // image = image.clone();
 }
 
-void ppm_save(AVFrame *incframe,
-              char *filename)
-{
-    FILE *f;
-    int xsize, ysize;
-
-    xsize = incframe->width;
-    ysize = incframe->height;
-
-    sws_scale(img_convert_ctx,
-              incframe->data,
-              incframe->linesize,
-              0,
-              ysize,
-              dst_data,
-              dst_linesize);
-
-    f = fopen(filename, "wb");
-
-    fprintf(f,
-            "P6\r\n%d %d\r\n%d\r\n",
-            xsize,
-            ysize,
-            255);
-
-    fwrite(dst_data[0],
-           1,
-           dst_bufsize,
-           f);
-
-    fclose(f);
-}
-
 std::pair<cv::Mat, cv::Mat> extractMVandResidual(const AVMotionVector *mvs, int size,
                                                  const cv::Mat &prevFrame, const cv::Mat &currFrame,
                                                  bool reset)
 {
     static cv::Mat motionMat;
     static cv::Mat residual;
+    static cv::Mat residualAgg;
 
     const AVMotionVector *mv = &mvs[0];
     int motionMatCols = static_cast<int>(video_dec_ctx->width / mv->w);
@@ -125,11 +90,11 @@ std::pair<cv::Mat, cv::Mat> extractMVandResidual(const AVMotionVector *mvs, int 
         motionMat = cv::Mat::zeros(motionMatRows, motionMatCols, CV_32FC2);
         residual = cv::Mat::zeros(motionMatRows, motionMatCols, CV_32FC3);
     }
-    if (reset)
-    {
-        motionMat.setTo(cv::Scalar::all(0));
-        residual.setTo(cv::Scalar::all(0));
-    }
+    // if (reset)
+    // {
+    motionMat.setTo(cv::Scalar::all(0));
+    residual.setTo(cv::Scalar::all(0));
+    // }
 
     cv::Mat motionCompensated = prevFrame.clone();
 
@@ -140,14 +105,16 @@ std::pair<cv::Mat, cv::Mat> extractMVandResidual(const AVMotionVector *mvs, int 
         int y = static_cast<int>(mv->dst_y / mv->h);
         if (x < 0 || x >= motionMatCols || y < 0 || y >= motionMatRows ||
             (mv->dst_x == mv->src_x && mv->dst_y == mv->src_y) ||
-            (mv->dst_x <0 || mv->dst_x >= currFrame.cols) || 
-            (mv->dst_y <0 || mv->dst_y >= currFrame.rows))
+            (mv->dst_x < 0 || mv->dst_x >= currFrame.cols) ||
+            (mv->dst_y < 0 || mv->dst_y >= currFrame.rows))
             continue;
         float val_x = mv->dst_x - mv->src_x;
         float val_y = mv->dst_y - mv->src_y;
 
-        motionMat.at<float>(y, x, 0) += val_x;
-        motionMat.at<float>(y, x, 1) += val_y;
+        motionMat.at<cv::Vec2f>(y, x) = cv::Vec2f(val_x, val_y);
+        // motionMat.at<float>(y, x) = val_y;
+
+        // continue;
 
         int orig_dst_x = int(mv->dst_x / mv->w) * mv->w;
         int orig_dst_y = int(mv->dst_y / mv->h) * mv->h;
@@ -162,80 +129,87 @@ std::pair<cv::Mat, cv::Mat> extractMVandResidual(const AVMotionVector *mvs, int 
         int top = diff_y > 0 ? diff_y : 0;
         int bottom = diff_y > 0 ? mv->h : mv->h - diff_y;
 
-        cv::Rect fullImageRect = cv::Rect(cv::Point(0,0), prevFrame.size());
+        cv::Rect fullImageRect = cv::Rect(cv::Point(0, 0), prevFrame.size());
         cv::Rect srcRect = cv::Rect(
-            cv::Point(right+orig_src_x, bottom + orig_src_y),
-            cv::Point(left+orig_src_x, top + orig_src_y)) & fullImageRect;
+                               cv::Point(right + orig_src_x, bottom + orig_src_y),
+                               cv::Point(left + orig_src_x, top + orig_src_y)) &
+                           fullImageRect;
         cv::Rect dstRect = cv::Rect(
-            cv::Point(orig_dst_x+mv->w-left, orig_dst_y+mv->h-top),
-            cv::Point(orig_dst_x, orig_dst_y)) & fullImageRect;
+                               cv::Point(orig_dst_x + mv->w - left, orig_dst_y + mv->h - top),
+                               cv::Point(orig_dst_x, orig_dst_y)) &
+                           fullImageRect;
 
-        if(srcRect.size() != dstRect.size() || 
-            (srcRect.width == 0 || srcRect.height == 0) || 
-            dstRect.width == 0 || dstRect.height == 0){
+        if (srcRect.size() != dstRect.size() ||
+            (srcRect.width == 0 || srcRect.height == 0) ||
+            dstRect.width == 0 || dstRect.height == 0)
+        {
             continue;
         }
-        
-        prevFrame(srcRect).copyTo(motionCompensated(dstRect));
+
+        prevFrame(dstRect).copyTo(motionCompensated(srcRect));
     }
     cv::absdiff(motionCompensated, currFrame, residual);
-    cv::imshow("MotionComp", residual);
-    // cv::waitKey(30);
+    // cv::absdiff(prevFrame, currFrame, residual);
     return std::pair<cv::Mat, cv::Mat>(motionMat, residual);
 }
 
 int decode_packet(const AVPacket *pkt)
 {
-    static cv::Mat image;
-    char buf[1024];
     int ret = avcodec_send_packet(video_dec_ctx, pkt);
     if (ret < 0)
-    {
-        // fprintf(stderr, "Error while sending a packet to the decoder: %s\n", av_err2str(ret));
         return ret;
-    }
+
     static cv::Mat prevFrame;
     static cv::Mat currFrame;
+    static cv::Mat aggResidual;
+
+    if(aggResidual.empty())
+        aggResidual = cv::Mat::zeros(video_dec_ctx->height, video_dec_ctx->width, CV_32FC3);
+
     bool reset = false;
+    int countSd = 0;
     while (ret >= 0)
     {
         ret = avcodec_receive_frame(video_dec_ctx, frame);
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-        {
             break;
-        }
         else if (ret < 0)
-        {
-            // fprintf(stderr, "Error while receiving a frame from the decoder: %s\n", av_err2str(ret));
             return ret;
-        }
 
         if (ret >= 0)
         {
-            int i;
-            AVFrameSideData *sd;
-
-            video_frame_count++;
-            sd = av_frame_get_side_data(frame, AV_FRAME_DATA_MOTION_VECTORS);
             prevFrame = currFrame.clone();
             avframeToMat(frame, currFrame);
-            if (sd && !prevFrame.empty())
+
+            AVFrameSideData *sd;
+            sd = av_frame_get_side_data(frame, AV_FRAME_DATA_MOTION_VECTORS);            
+            if (sd)
             {
+                countSd ++;
                 const AVMotionVector *mvs = (const AVMotionVector *)sd->data;
                 auto res = extractMVandResidual(mvs, sd->size, prevFrame, currFrame, reset);
                 reset = false;
-                // motionToColor(dxdy.first, dxdy.second);
+                // std::cout << res.second << std::endl;
+                cv::Mat flow = motionToColor(res.first);
+
+                cv::Mat temp; res.second.convertTo(temp, CV_32FC3, 1./255);
+                aggResidual += temp;
+                temp = (aggResidual / countSd) * 255.0;
+                temp.convertTo(temp, CV_8UC3);
+                // cv::normalize(aggResidual, temp, 0, 255, cv::NORM_MINMAX, CV_8UC3);
+
+
+                cv::imshow("residual", res.second);
+                cv::imshow("residual_agg", temp);
+                cv::imshow("optical flow", flow);
             }
-            else
-            {
+            else {
                 reset = true;
+                aggResidual.setTo(0);
             }
-            std::cout << video_dec_ctx->frame_number << std::endl;
-            snprintf(buf, sizeof(buf), "%s-%d.ppm", "images", video_dec_ctx->frame_number);
-            // ppm_save(frame, buf);
+
             cv::imshow("image", currFrame);
-            cv::waitKey(20);
-            // }
+            cv::waitKey(50);
             av_frame_unref(frame);
         }
     }
@@ -335,9 +309,6 @@ int main(int argc, char **argv)
         fprintf(stderr, "Could not allocate frame\n");
         ret = AVERROR(ENOMEM);
     }
-
-    printf("%d, %d\n", video_dec_ctx->width, video_dec_ctx->height);
-    printf("framenum,source,blockw,blockh,srcx,srcy,dstx,dsty,flags\n");
 
     int w = video_dec_ctx->width;
     int h = video_dec_ctx->height;
